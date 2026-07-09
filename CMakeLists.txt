@@ -108,6 +108,9 @@ elseif (processor MATCHES "^aarch64|^arm64|^armv8\.*")
   if (processor MATCHES "^arm64ec")
     set(ARCHITECTURE_arm64ec 1)
     add_compile_definitions(ARCHITECTURE_arm64ec=1)
+    # proton-mac: this arm64ec module runs under our Wine-on-macOS substrate; enable the macOS JIT W^X
+    # dual-map (RW write alias + RX exec alias) and its integration points.
+    add_compile_definitions(PROTON_MAC=1)
   endif()
 endif()
 

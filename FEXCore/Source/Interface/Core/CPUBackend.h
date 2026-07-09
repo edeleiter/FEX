@@ -42,8 +42,12 @@ struct GuestToHostMap;
 
 namespace CPU {
   struct CodeBuffer {
-    uint8_t* Ptr;
+    uint8_t* Ptr;         // WRITE VA (RW). proton-mac: emit/memcpy here.
     size_t AllocatedSize; // including guard page; see UsableSize()
+
+    // proton-mac JIT W^X: Ptr is RW; the executable copy lives at Ptr+ExecDelta (a separate RX alias Wine
+    // mach_vm_remap'd). Dispatch targets + ClearICache must use the exec VA. 0 => same VA (Linux/no dualmap).
+    ptrdiff_t ExecDelta = 0;
 
     fextl::unique_ptr<GuestToHostMap> LookupCache;
 

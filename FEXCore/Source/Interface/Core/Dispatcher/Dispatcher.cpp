@@ -41,6 +41,54 @@ Dispatcher::Dispatcher(FEXCore::Context::ContextImpl* ctx)
   , CTX {ctx} {
   EmitDispatcher();
 
+#ifdef PROTON_MAC
+  // proton-mac JIT W^X: the dispatcher was emitted into a dual-mapped buffer (RW base here). EmitDispatcher
+  // recorded write-VA host addresses that FEX branches to; translate them ONCE to the RX exec alias so
+  // InitThreadPointers / MakeSignalDelegatorConfig hand out exec-VA. (No per-buffer lookup needed; all are in
+  // this one dispatcher buffer.)
+  if (void* ExecAlias = FEXCore::Allocator::GetExecAlias(GetBufferBase())) {
+    const ptrdiff_t ExecDelta = static_cast<uint8_t*>(ExecAlias) - GetBufferBase();
+    auto T = [ExecDelta](uint64_t& a) {
+      if (a) {
+        a += ExecDelta;
+      }
+    };
+    T(ThreadStopHandlerAddress);
+    T(ThreadStopHandlerAddressSpillSRA);
+    T(AbsoluteLoopTopAddress);
+    T(AbsoluteLoopTopAddressFillSRA);
+    T(AbsoluteLoopTopAddressEnterEC);
+    T(AbsoluteLoopTopAddressEnterECFillSRA);
+    T(ThreadPauseHandlerAddress);
+    T(ThreadPauseHandlerAddressSpillSRA);
+    T(ExitFunctionLinkerAddress);
+    T(SignalHandlerReturnAddress);
+    T(SignalHandlerReturnAddressRT);
+    T(GuestSignal_SIGILL);
+    T(GuestSignal_SIGTRAP);
+    T(GuestSignal_SIGSEGV);
+    T(PauseReturnInstruction);
+    T(Start);
+    T(End);
+    T(LUDIVHandlerAddress);
+    T(LDIVHandlerAddress);
+    T(F64SinHandlerAddress);
+    T(F64CosHandlerAddress);
+    T(F64TanHandlerAddress);
+    T(F64F2XM1HandlerAddress);
+    T(F64ScaleHandlerAddress);
+    T(F64AtanHandlerAddress);
+    T(F64FYL2XHandlerAddress);
+    T(F64FYL2XP1HandlerAddress);
+    T(F64FPREMHandlerAddress);
+    T(F64FPREM1HandlerAddress);
+    DispatchPtr = reinterpret_cast<AsmDispatch>(reinterpret_cast<uintptr_t>(DispatchPtr) + ExecDelta);
+    CallbackPtr = reinterpret_cast<JITCallback>(reinterpret_cast<uintptr_t>(CallbackPtr) + ExecDelta);
+  } else {
+    LogMan::Msg::EFmt("proton-mac: no exec alias for dispatcher buffer");
+  }
+#endif
+
   FEXCore::Allocator::VirtualName("FEXMem_Misc", reinterpret_cast<void*>(GetBufferBase()), MAX_DISPATCHER_CODE_SIZE);
 }
 

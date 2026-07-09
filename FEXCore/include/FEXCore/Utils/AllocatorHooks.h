@@ -11,6 +11,9 @@
 #else
 #define NTDDI_VERSION 0x0A000005
 #include <memoryapi.h>
+#ifdef PROTON_MAC
+#include <libloaderapi.h>
+#endif
 #endif
 
 #include <new>
@@ -53,7 +56,13 @@ inline void* VirtualAlloc(void* Base, size_t Size, bool Execute = false, bool Co
   MEM_EXTENDED_PARAMETER Parameter {};
   if (Execute) {
     Parameter.Type = MemExtendedParameterAttributeFlags;
-    Parameter.ULong64 = MEM_EXTENDED_PARAMETER_EC_CODE;
+    // proton-mac JIT W^X: macOS forbids single-VA anon RWX; the dualmap flag asks Wine to keep the base RW
+    // and hand back a separate RX alias (queried via NtQueryVirtualMemory(MemoryFexExecAlias)).
+    Parameter.ULong64 = MEM_EXTENDED_PARAMETER_EC_CODE
+#ifdef PROTON_MAC
+                        | 0x80000000ull /* MEM_EXTENDED_PARAMETER_FEX_DUALMAP */
+#endif
+        ;
   };
   return ::VirtualAlloc2(nullptr, Base, Size, Flags, Execute ? PAGE_EXECUTE_READWRITE : PAGE_READWRITE, Execute ? &Parameter : nullptr,
                          Execute ? 1 : 0);
@@ -61,6 +70,24 @@ inline void* VirtualAlloc(void* Base, size_t Size, bool Execute = false, bool Co
   return ::VirtualAlloc(Base, Size, Flags, Execute ? PAGE_EXECUTE_READWRITE : PAGE_READWRITE);
 #endif
 }
+
+#ifdef PROTON_MAC
+// proton-mac JIT W^X: return the RX exec alias Wine mach_vm_remap'd for a dualmap JIT write base (queried at
+// runtime to avoid pulling the ntdll headers into FEXCore). nullptr => no alias (falls back to write==exec).
+inline void* GetExecAlias(void* Base) {
+  using QueryFn = int32_t (*)(void*, const void*, int32_t, void*, size_t, size_t*);
+  static QueryFn Query =
+    reinterpret_cast<QueryFn>(reinterpret_cast<void*>(GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtQueryVirtualMemory")));
+  if (!Query) {
+    return nullptr;
+  }
+  void* Alias = nullptr;
+  if (Query(reinterpret_cast<void*>(~static_cast<size_t>(0)), Base, 2001 /*MemoryFexExecAlias*/, &Alias, sizeof(Alias), nullptr) == 0) {
+    return Alias;
+  }
+  return nullptr;
+}
+#endif
 
 inline void* VirtualAlloc(size_t Size, bool Execute = false, bool Commit = true) {
   return VirtualAlloc(nullptr, Size, Execute, Commit);

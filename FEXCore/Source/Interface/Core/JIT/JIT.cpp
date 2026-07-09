@@ -555,6 +555,14 @@ uint64_t Arm64JITCore::ExitFunctionLink(FEXCore::Core::CpuStateFrame* Frame, FEX
     }
   }
 
+#ifdef PROTON_MAC
+  // proton-mac JIT W^X: block-linking below patches the caller's ALREADY-EXECUTING code, which lives at the
+  // RX exec alias (not writable under the dual-map). Skip linking and re-dispatch per block via the returned
+  // HostCode instead. Perf-only; correctness preserved. (Direct-link support needs the runtime exec->write
+  // translation — deferred.)
+  return HostCode;
+#endif
+
   // See ExitFunction in BranchOps.cpp for an assembly level view of the handled cases.
   uintptr_t JumpThunkStartAddress = reinterpret_cast<uintptr_t>(Record) - 0x10;
   uintptr_t CallerAddress = JumpThunkStartAddress + Record->CallerOffset;
@@ -1123,6 +1131,20 @@ CPUBackend::CompiledCode Arm64JITCore::CompileCode(uint64_t Entry, uint64_t Size
     SetCursorOffset(CodeBuffers.LatestOffset + TempSize);
 
     CodeBuffers.LatestOffset = GetCursorOffset();
+
+#ifdef PROTON_MAC
+    // proton-mac JIT W^X: the block was WRITTEN via CurrentCodeBuffer->Ptr (the RW base). Dispatch targets
+    // (BlockBegin/EntryPoints, which enter the LookupCache) and ClearICache must reference the RX exec alias.
+    // Translate now that all writes into this buffer are complete.
+    if (CurrentCodeBuffer->ExecDelta) {
+      const auto ExecDelta = CurrentCodeBuffer->ExecDelta;
+      CodeData.BlockBegin += ExecDelta;
+      for (auto& EntryPoint : CodeData.EntryPoints) {
+        EntryPoint.second += ExecDelta;
+      }
+      CodeBegin += ExecDelta;
+    }
+#endif
   }
 
   TempAllocator.DelayedDisownBuffer();

@@ -355,6 +355,16 @@ namespace CPU {
     Ptr = static_cast<uint8_t*>(FEXCore::Allocator::VirtualAlloc(Size, true));
     LOGMAN_THROW_A_FMT(!!Ptr, "Couldn't allocate code buffer");
 
+#ifdef PROTON_MAC
+    // proton-mac JIT W^X: Ptr is RW; fetch the separate RX exec alias Wine created (mach_vm_remap). Dispatch
+    // targets + ClearICache use Ptr+ExecDelta; emission/memcpy stay on Ptr.
+    if (void* ExecAlias = FEXCore::Allocator::GetExecAlias(Ptr)) {
+      ExecDelta = static_cast<uint8_t*>(ExecAlias) - Ptr;
+    } else {
+      LogMan::Msg::EFmt("proton-mac: no exec alias for JIT buffer {} -- will fetch-fault", static_cast<void*>(Ptr));
+    }
+#endif
+
     // Protect the last page of the allocated buffer to trigger SIGSEGV on write access
     uintptr_t LastPageAddr = AlignDown(reinterpret_cast<uintptr_t>(Ptr) + Size - 1, FEXCore::Utils::FEX_PAGE_SIZE);
     if (!FEXCore::Allocator::VirtualProtect(reinterpret_cast<void*>(LastPageAddr), FEXCore::Utils::FEX_PAGE_SIZE,

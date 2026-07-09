@@ -470,6 +470,7 @@ typedef enum _MEMORY_INFORMATION_CLASS {
   MemoryWineUnloadUnixLib,
 #endif
   MemoryFexStatsShm = 2000,
+  MemoryFexExecAlias = 2001, // proton-mac: RX exec alias for a dualmap JIT write base
 } MEMORY_INFORMATION_CLASS;
 
 #define SystemEmulationBasicInformation (SYSTEM_INFORMATION_CLASS)62
