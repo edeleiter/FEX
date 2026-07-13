@@ -55,6 +55,22 @@ BeginSimulation:
   // Expects the target code address in x9
 .global ExitFunctionEC
 ExitFunctionEC:
+  // --- proton-mac Site A: (1) free-running liveness counter (does ExitFunctionEC run at all?), (2) one-shot
+  //     armed record of the target x9 into g_RecEC[id]. Only x16/x17 (scratch; x17 killed by mrs below). ---
+  adrp x16, g_SiteA_EverFired
+  ldr  x17, [x16, #:lo12:g_SiteA_EverFired]
+  add  x17, x17, #1
+  str  x17, [x16, #:lo12:g_SiteA_EverFired]
+  adrp x16, g_TraceArmed
+  ldr  x17, [x16, #:lo12:g_TraceArmed]
+  cbz  x17, 1f
+  str  xzr, [x16, #:lo12:g_TraceArmed]      // one-shot consume
+  adrp x16, g_RecEC
+  add  x16, x16, #:lo12:g_RecEC
+  add  x16, x16, x17, lsl #5                 // &g_RecEC[id*4]
+  str  x9, [x16, #8]                          // rec.selector = x9 (target EC entry)
+1:
+  // --- end proton-mac Site A ---
   // Clear any the AFP NEP and AH bits in FPCR as native code won't expect their behaviour.
   mrs x17, fpcr
   and x17, x17, #~6 // NEP + AH
@@ -146,6 +162,30 @@ DIRECT_SYSCALL_WRAPPER("#NtProtectVirtualMemoryNative", WineNtProtectVirtualMemo
   ldr w11, [x17, x16, lsl #2]
   add x11, x11, x9
 end:
+  // --- proton-mac Site B: (1) free-running liveness counter, (2) one-shot armed record into g_RecCC[id] of
+  //     {seq, x10=exit-thunk selector (x9 is dead=NtDllBase here; x10 is CheckCall-unused and per-signature),
+  //     x11=target FFS, x30=lr}. x16/x17 scratch (CheckCall about to ret); x10 captured then reused. ---
+  adrp x16, g_SiteB_EverFired
+  ldr  x17, [x16, #:lo12:g_SiteB_EverFired]
+  add  x17, x17, #1
+  str  x17, [x16, #:lo12:g_SiteB_EverFired]
+  adrp x16, g_TraceArmed
+  ldr  x17, [x16, #:lo12:g_TraceArmed]
+  cbz  x17, 1f
+  str  xzr, [x16, #:lo12:g_TraceArmed]      // one-shot consume
+  adrp x16, g_RecCC
+  add  x16, x16, #:lo12:g_RecCC
+  add  x16, x16, x17, lsl #5                 // &g_RecCC[id*4]
+  str  x10, [x16, #8]                         // rec.selector = x10 (exit thunk)
+  str  x11, [x16, #16]                        // rec.target   = x11 (FFS)
+  str  x30, [x16, #24]                        // rec.lr
+  adrp x10, g_FireSeq
+  ldr  x17, [x10, #:lo12:g_FireSeq]
+  add  x17, x17, #1
+  str  x17, [x10, #:lo12:g_FireSeq]
+  str  x17, [x16, #0]                         // rec.seq (distinct per fire -> proves no aliasing)
+1:
+  // --- end proton-mac Site B ---
   ret
 
   // Expects target address in x0, and the SP to set in x1
