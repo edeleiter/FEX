@@ -92,46 +92,6 @@ NTSTATUS NtProtectVirtualMemoryNative(HANDLE, PVOID*, SIZE_T*, ULONG, ULONG*);
 
 [[noreturn]]
 void JumpSetStack(uintptr_t PC, uintptr_t SP);
-
-// ---- proton-mac R1a path-discrimination markers (Phase 3 micro-spike 2) --------------------------------
-// One-shot armed markers, referenced from Module.S via adrp/ldr. Static module globals (always-mapped image
-// data -> no cold-page/pre-fault hazard, unlike a VirtualAlloc ring). g_TraceArmed holds an id (1..7); each
-// site records into g_Hit{EC,CC,BL}[id] then zeroes g_TraceArmed (one-shot), so only the single transition
-// immediately following ProtonArm(id) is captured -- the arming call's own transition never pollutes it.
-// g_HitEC = did the FFS->EC direct-branch (ExitFunctionEC) run; g_HitCC = did CheckCall passthrough run;
-// g_HitBL = did the non-EC/block-linker path run (Site C, added only if needed).
-uint64_t g_TraceArmed = 0;
-uint64_t g_FireSeq = 0;          // monotonic; captured per fire to prove distinct fires (kills aliasing)
-uint64_t g_SiteA_EverFired = 0;  // free-running (no arm gate): did ExitFunctionEC run for ANYTHING?
-uint64_t g_SiteB_EverFired = 0;  // free-running: did CheckCall end: run for ANYTHING?
-// per-id records, 4 u64 each: [id*4 + {0:seq, 1:selector, 2:target, 3:lr}]
-//   Site A (g_RecEC): selector = x9 (target EC entry).           Site B (g_RecCC): selector = x10 (exit
-//   thunk, per-signature -- x9 is dead at CheckCall end:, clobbered to NtDllBase), target = x11.
-uint64_t g_RecEC[32] = {};
-uint64_t g_RecCC[32] = {};
-
-// ---- proton-mac R1a "Site D" sequence ring (supersedes the one-shot for CheckCall) ----------------------
-// The one-shot above captured only the FIRST CheckCall after arming, which turned out to be a common
-// FEX-internal pre-step (ECSyscallHandler::PreCompile, NOT the user32 dispatch) -- identical for every call.
-// The real user32 divergence is a LATER fire. So instead of one record, record EVERY CheckCall fire while
-// ring-armed into g_RingCC, then diff the GetCursorPos fire-stream against the PeekMessage stream host-side.
-// Independent of g_TraceArmed so Site A's one-shot cannot disarm the ring (and vice-versa).
-//   g_RingArmed    -- 0=off, else the active id (guest sets before a call, clears after).
-//   g_RingCount    -- fires recorded this arm; also the append index; guest resets to 0 between the 2 calls.
-//   g_RingOverflow -- set if a fire arrived with the ring already full (guards against a truncated ring).
-//   g_EntryX9      -- CheckCall-top stashes x9-on-entry here (the contract's own/FFS addr, dead by end:);
-//                     end: pairs it back. Safe: CheckCall makes no calls, so it is non-re-entrant per thread.
-//   g_RingCC       -- 1-D ring, RING_SLOTS slots x 14 u64:
-//                     {seq, entry-x9, x10, x11, x30, x0, x1, x2, x3, x4, x5, x6, x7, x8}
-//                     (offsets 0,8,16,...,104). x10 = the exit-thunk SIGNATURE (the fork discriminator);
-//                     x0-x8 = the arg/return register state the guest hands each dispatch (fork-58 probe:
-//                     what input drives PeekMessage down the return path vs GetCursorPos into its body).
-static constexpr uint64_t RING_SLOTS = 512;
-uint64_t g_RingArmed = 0;
-uint64_t g_RingCount = 0;
-uint64_t g_RingOverflow = 0;
-uint64_t g_EntryX9 = 0;
-uint64_t g_RingCC[RING_SLOTS * 14] = {};
 }
 
 struct ThreadCPUArea {
@@ -617,34 +577,6 @@ extern "C" void SyncThreadContext(CONTEXT* Context) {
   Exception::LoadStateFromECContext(Thread, *Context);
 }
 
-// ---- proton-mac R1a EC-transition trace sink (Phase 3) --------------------------------------------------
-// File-based: LogMan/__wine_dbg_output is invisible in our harness, and stderr crashes this CRT; fopen/fwrite
-// are the only known-safe CRT I/O here. Gated on PROTON_FEXLOG holding a Windows path (use 'Z:\tmp\...', since
-// Wine maps Z: to host /, so the host reads it directly). Opened once at ProcessInit (a safe, non-JIT context).
-namespace {
-// Store only the path; open-append-close PER WRITE. Holding the FILE* open across the process lifetime broke
-// a later FEX-hosted process's init (proven), whereas fopen/fwrite/fclose per call is safe. Append mode so
-// every FEX-hosted process (wineboot, services, the guest) accumulates rather than truncating each other.
-const char* ProtonSinkPath = nullptr;
-void ProtonSinkInit() {
-  ProtonSinkPath = getenv("PROTON_FEXLOG");
-}
-void ProtonSinkWrite(const char* Buf, size_t Len) {
-  if (!ProtonSinkPath) {
-    return;
-  }
-  if (FILE* F = fopen(ProtonSinkPath, "a")) {
-    fwrite(Buf, 1, Len, F);
-    fclose(F); // close per write: a hard guest fault can't eat the tail, and no handle is held open
-  }
-}
-} // namespace
-
-// The trace guest drives these globals via DATA exports (see libarm64ecfex.def): it WRITES g_TraceArmed to
-// one-shot-arm the next x64->EC transition, and READS g_Hit{EC,CC,BL}[id] to report which path fired. Plain
-// shared-memory access -- no call into the FEX module (which, as its own emulator, is not cleanly re-entrant
-// for an emulated-x64 call into its exports).
-
 NTSTATUS ProcessInit() {
   InitSyscalls();
 
@@ -653,13 +585,6 @@ NTSTATUS ProcessInit() {
   FEX::Config::LoadConfig(fextl::string {ExecutableName}, _environ, FEX::ReadPortabilityInformation());
   FEXCore::Config::ReloadMetaLayer();
   FEX::Windows::Logging::Init();
-  // proton-mac micro-spike 1 (R1a trace sink gate): prove the file sink reaches the host.
-  ProtonSinkInit();
-  {
-    char Buf[160];
-    const int N = snprintf(Buf, sizeof(Buf), "PROTON-SINK-ALIVE pid=%lx\n", (unsigned long)GetCurrentProcessId());
-    ProtonSinkWrite(Buf, N);
-  }
 
   FEXCore::Config::Set(FEXCore::Config::CONFIG_IS64BIT_MODE, "1");
 

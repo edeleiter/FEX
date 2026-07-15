@@ -55,22 +55,6 @@ BeginSimulation:
   // Expects the target code address in x9
 .global ExitFunctionEC
 ExitFunctionEC:
-  // --- proton-mac Site A: (1) free-running liveness counter (does ExitFunctionEC run at all?), (2) one-shot
-  //     armed record of the target x9 into g_RecEC[id]. Only x16/x17 (scratch; x17 killed by mrs below). ---
-  adrp x16, g_SiteA_EverFired
-  ldr  x17, [x16, #:lo12:g_SiteA_EverFired]
-  add  x17, x17, #1
-  str  x17, [x16, #:lo12:g_SiteA_EverFired]
-  adrp x16, g_TraceArmed
-  ldr  x17, [x16, #:lo12:g_TraceArmed]
-  cbz  x17, 1f
-  str  xzr, [x16, #:lo12:g_TraceArmed]      // one-shot consume
-  adrp x16, g_RecEC
-  add  x16, x16, #:lo12:g_RecEC
-  add  x16, x16, x17, lsl #5                 // &g_RecEC[id*4]
-  str  x9, [x16, #8]                          // rec.selector = x9 (target EC entry)
-1:
-  // --- end proton-mac Site A ---
   // Clear any the AFP NEP and AH bits in FPCR as native code won't expect their behaviour.
   mrs x17, fpcr
   and x17, x17, #~6 // NEP + AH
@@ -149,11 +133,6 @@ DIRECT_SYSCALL_WRAPPER("#NtProtectVirtualMemoryNative", WineNtProtectVirtualMemo
   // Expects the FFS address in x11, exit thunk address in x10 (unused) and it's own address in x9. Return address is in x11.
 .global "CheckCall"
 "CheckCall":
-  // --- proton-mac Site D (entry): stash x9-on-entry (own/FFS address per the contract above) before it is
-  //     clobbered to NtDllBase below. Unconditional; x16 is CheckCall scratch (overwritten at the subs
-  //     below). Single store to always-mapped module .data -> inert, no fault. end: pairs it into the ring. ---
-  adrp x16, g_EntryX9
-  str  x9, [x16, #:lo12:g_EntryX9]
   adrp x9, NtDllBase
   ldr x9, [x9, #:lo12:NtDllBase]
   subs x16, x11, x9
@@ -167,79 +146,6 @@ DIRECT_SYSCALL_WRAPPER("#NtProtectVirtualMemoryNative", WineNtProtectVirtualMemo
   ldr w11, [x17, x16, lsl #2]
   add x11, x11, x9
 end:
-  // --- proton-mac Site B: (1) free-running liveness counter, (2) one-shot armed record into g_RecCC[id] of
-  //     {seq, x10=exit-thunk selector (x9 is dead=NtDllBase here; x10 is CheckCall-unused and per-signature),
-  //     x11=target FFS, x30=lr}. x16/x17 scratch (CheckCall about to ret); x10 captured then reused. ---
-  adrp x16, g_SiteB_EverFired
-  ldr  x17, [x16, #:lo12:g_SiteB_EverFired]
-  add  x17, x17, #1
-  str  x17, [x16, #:lo12:g_SiteB_EverFired]
-  adrp x16, g_TraceArmed
-  ldr  x17, [x16, #:lo12:g_TraceArmed]
-  cbz  x17, 1f
-  str  xzr, [x16, #:lo12:g_TraceArmed]      // one-shot consume
-  adrp x16, g_RecCC
-  add  x16, x16, #:lo12:g_RecCC
-  add  x16, x16, x17, lsl #5                 // &g_RecCC[id*4]
-  str  x10, [x16, #8]                         // rec.selector = x10 (exit thunk)
-  str  x11, [x16, #16]                        // rec.target   = x11 (FFS)
-  str  x30, [x16, #24]                        // rec.lr
-  adrp x10, g_FireSeq
-  ldr  x17, [x10, #:lo12:g_FireSeq]
-  add  x17, x17, #1
-  str  x17, [x10, #:lo12:g_FireSeq]
-  str  x17, [x16, #0]                         // rec.seq (distinct per fire -> proves no aliasing)
-1:
-  // --- end proton-mac Site B ---
-  // --- proton-mac Site D: per-arm sequence ring. Records EVERY CheckCall fire while g_RingArmed!=0 into
-  //     g_RingCC[count] = {seq, entry-x9, x10, x11, x30, x0..x8} (14 u64/slot), so the GetCursorPos
-  //     fire-stream can be diffed against the PeekMessage stream host-side. x10 = the exit-thunk SIGNATURE
-  //     (the fork discriminator); x0-x8 = the arg/return register state the guest hands each dispatch
-  //     (fork-58 probe: what input drives PeekMessage's return-vs-continue branch). Scratch: x16/x17 and
-  //     x9 (dead=NtDllBase here). x10/x11/x30 AND x0-x8 are READ-ONLY -> preserved for the caller (x0-x8 are
-  //     the very args being forwarded; clobbering any would corrupt the call). Gated on g_RingArmed (NOT
-  //     g_TraceArmed) so Site A/B one-shots stay independent; the guest never sets g_TraceArmed in this
-  //     build, so the Site B one-shot above is inert and all live regs reach here untouched. ---
-  adrp x16, g_RingArmed
-  ldr  x17, [x16, #:lo12:g_RingArmed]
-  cbz  x17, 2f                                // not ring-armed -> skip
-  adrp x16, g_RingCount
-  ldr  x17, [x16, #:lo12:g_RingCount]         // x17 = count (also the append index)
-  cmp  x17, #512                              // RING_SLOTS -- MUST match Module.cpp
-  b.hs 3f                                     // ring full -> flag overflow, skip append
-  add  x9, x17, #1
-  str  x9, [x16, #:lo12:g_RingCount]          // g_RingCount = count + 1
-  adrp x16, g_RingCC
-  add  x16, x16, #:lo12:g_RingCC
-  add  x16, x16, x17, lsl #6                  // + idx*64
-  add  x16, x16, x17, lsl #5                  // + idx*32  (=> idx*96)
-  add  x16, x16, x17, lsl #4                  // + idx*16  (=> idx*112 = 14 u64 slot); x16 = &slot
-  adrp x9, g_FireSeq                          // field 0: seq = ++g_FireSeq
-  ldr  x17, [x9, #:lo12:g_FireSeq]
-  add  x17, x17, #1
-  str  x17, [x9, #:lo12:g_FireSeq]
-  str  x17, [x16, #0]                         // slot.seq
-  adrp x9, g_EntryX9                          // field 1: entry-x9 (stashed at CheckCall top)
-  ldr  x17, [x9, #:lo12:g_EntryX9]
-  str  x17, [x16, #8]                         // slot.entry_x9
-  str  x10, [x16, #16]                        // field 2: x10 (live -- exit-thunk signature)
-  str  x11, [x16, #24]                        // field 3: x11 (live -- JIT-buffer target)
-  str  x30, [x16, #32]                        // field 4: x30 (lr, live)
-  str  x0,  [x16, #40]                        // fields 5-13: x0..x8 (LIVE args/return -- READ ONLY)
-  str  x1,  [x16, #48]
-  str  x2,  [x16, #56]
-  str  x3,  [x16, #64]
-  str  x4,  [x16, #72]
-  str  x5,  [x16, #80]
-  str  x6,  [x16, #88]
-  str  x7,  [x16, #96]
-  str  x8,  [x16, #104]
-  b    2f
-3:
-  adrp x16, g_RingOverflow                    // ring full -> record truncation
-  mov  x17, #1
-  str  x17, [x16, #:lo12:g_RingOverflow]
-2:
   ret
 
   // Expects target address in x0, and the SP to set in x1

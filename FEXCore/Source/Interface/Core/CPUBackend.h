@@ -181,6 +181,12 @@ namespace CPU {
 
     bool IsAddressInCodeBuffer(uintptr_t Address) const;
 
+    // proton-mac W^X dual-map: JIT code executes from a separate RX exec alias at Ptr+ExecDelta. Given an
+    // ALIAS program counter (e.g. a faulting JIT PC), returns the owning code buffer's ExecDelta so callers
+    // can recover the RW base = AliasAddress - ExecDelta for in-place code backpatching. Returns 0 if the
+    // address is in no buffer's alias range, and always 0 on Linux/no-dualmap (ExecDelta == 0 there).
+    ptrdiff_t GetExecDeltaForAddress(uintptr_t AliasAddress) const;
+
     // Updates the CodeBuffer if needed and returns a reference to the old one.
     // The returned reference should be kept alive carefully to avoid early deletion of resources.
     [[nodiscard]]

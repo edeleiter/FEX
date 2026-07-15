@@ -2082,6 +2082,8 @@ std::optional<int32_t> HandleUnalignedAccess(FEXCore::Core::InternalThreadState*
       return std::nullopt;
     }
   } else if ((Instr & ArchHelpers::Arm64::LDAXR_MASK) == ArchHelpers::Arm64::LDAXR_INST) { // LDAXR*
+    // proton-mac: read-only on code (decodes forward instructions via ProgramCounter, CASes on guest data);
+    // no RW-base redirect needed. If BytesToSkip == 0 this falls through to the backpatch handler (WritePC).
     uint64_t BytesToSkip = ArchHelpers::Arm64::HandleAtomicLoadstoreExclusive(ProgramCounter, GPRs, StrictSplitLockMutex);
     if (BytesToSkip) {
       // Skip this instruction now
@@ -2090,6 +2092,7 @@ std::optional<int32_t> HandleUnalignedAccess(FEXCore::Core::InternalThreadState*
     // Explicit fallthrough to the backpatch handler below!
   } else if ((Instr & ArchHelpers::Arm64::LDAXP_MASK) == ArchHelpers::Arm64::LDAXP_INST) { // LDAXP
     // Should be compare and swap pair only. LDAXP not used elsewhere
+    // proton-mac: read-only on code (decodes via ProgramCounter, CASes on guest data); no RW-base redirect.
     uint64_t BytesToSkip = ArchHelpers::Arm64::HandleCASPAL_ARMv8(Instr, ProgramCounter, GPRs, StrictSplitLockMutex);
     if (BytesToSkip) {
       // Skip this instruction now
@@ -2100,10 +2103,21 @@ std::optional<int32_t> HandleUnalignedAccess(FEXCore::Core::InternalThreadState*
     }
   }
 
+  // proton-mac W^X dual-map: ProgramCounter and InlineTail are RX exec-alias addresses (JIT executes from
+  // the alias, never the RW base). Every in-place code write below — the backpatch stores AND the
+  // SpinLockFutex CAS (the futex lives in the JITCodeTail, which is in the alias-mapped buffer) — must target
+  // the RW base = alias - ExecDelta. ClearICache and the read-back reconciliation loads stay on the alias
+  // (the exec VA / an RX-readable mapping). Base and alias are the same physical pages (mach_vm_remap), so a
+  // base-side store is visible through the alias. ExecDelta == 0 on Linux/no-dualmap => WritePC == PC, a no-op.
+  const ptrdiff_t ExecDelta = Thread->CPUBackend->GetExecDeltaForAddress(ProgramCounter);
+  uint32_t* const WritePC = reinterpret_cast<uint32_t*>(ProgramCounter - ExecDelta);
+  auto* const WriteInlineTail =
+    reinterpret_cast<CPU::CPUBackend::JITCodeTail*>(reinterpret_cast<uintptr_t>(InlineTail) - ExecDelta);
+
   // Lock code mutex during any SIGBUS handling that potentially changes code.
   // Due to code buffer sharing between threads, code must be carefully backpatched from last to first.
   // Multiple threads can be attempting to handle the SIGBUS or even be executing the code being backpatched.
-  FEXCore::Utils::SpinWaitLock::UniqueSpinMutex lk(&InlineTail->SpinLockFutex);
+  FEXCore::Utils::SpinWaitLock::UniqueSpinMutex lk(&WriteInlineTail->SpinLockFutex);
 
   if ((Instr & LDAXR_MASK) == LDAR_INST ||  // LDAR*
       (Instr & LDAXR_MASK) == LDAPR_INST) { // LDAPR*
@@ -2113,9 +2127,9 @@ std::optional<int32_t> HandleUnalignedAccess(FEXCore::Core::InternalThreadState*
     LDR |= DataReg;
     if (HandleType != UnalignedHandlerType::NonAtomic) {
       // Ordering matters with cross-thread visibility!
-      std::atomic_ref<uint32_t>(PC[1]).store(DMB_LD, std::memory_order_release); // Back-patch the half-barrier.
+      std::atomic_ref<uint32_t>(WritePC[1]).store(DMB_LD, std::memory_order_release); // Back-patch the half-barrier.
     }
-    std::atomic_ref<uint32_t>(PC[0]).store(LDR, std::memory_order_release);
+    std::atomic_ref<uint32_t>(WritePC[0]).store(LDR, std::memory_order_release);
     ClearICache(&PC[0], 8);
     // With the instruction modified, now execute again.
     return 0;
@@ -2125,9 +2139,9 @@ std::optional<int32_t> HandleUnalignedAccess(FEXCore::Core::InternalThreadState*
     STR |= AddrReg << 5;
     STR |= DataReg;
     if (HandleType != UnalignedHandlerType::NonAtomic) {
-      std::atomic_ref<uint32_t>(PC[-1]).store(DMB, std::memory_order_release); // Back-patch the half-barrier.
+      std::atomic_ref<uint32_t>(WritePC[-1]).store(DMB, std::memory_order_release); // Back-patch the half-barrier.
     }
-    std::atomic_ref<uint32_t>(PC[0]).store(STR, std::memory_order_release);
+    std::atomic_ref<uint32_t>(WritePC[0]).store(STR, std::memory_order_release);
     ClearICache(&PC[-1], 8);
     // Back up one instruction and have another go
     return -4;
@@ -2140,9 +2154,9 @@ std::optional<int32_t> HandleUnalignedAccess(FEXCore::Core::InternalThreadState*
     LDUR |= Instr & (0b1'1111'1111 << 12);
     if (HandleType != UnalignedHandlerType::NonAtomic) {
       // Ordering matters with cross-thread visibility!
-      std::atomic_ref<uint32_t>(PC[1]).store(DMB_LD, std::memory_order_release); // Back-patch the half-barrier.
+      std::atomic_ref<uint32_t>(WritePC[1]).store(DMB_LD, std::memory_order_release); // Back-patch the half-barrier.
     }
-    std::atomic_ref<uint32_t>(PC[0]).store(LDUR, std::memory_order_release);
+    std::atomic_ref<uint32_t>(WritePC[0]).store(LDUR, std::memory_order_release);
     ClearICache(&PC[0], 8);
     // With the instruction modified, now execute again.
     return 0;
@@ -2153,9 +2167,9 @@ std::optional<int32_t> HandleUnalignedAccess(FEXCore::Core::InternalThreadState*
     STUR |= DataReg;
     STUR |= Instr & (0b1'1111'1111 << 12);
     if (HandleType != UnalignedHandlerType::NonAtomic) {
-      std::atomic_ref<uint32_t>(PC[-1]).store(DMB, std::memory_order_release); // Back-patch the half-barrier.
+      std::atomic_ref<uint32_t>(WritePC[-1]).store(DMB, std::memory_order_release); // Back-patch the half-barrier.
     }
-    std::atomic_ref<uint32_t>(PC[0]).store(STUR, std::memory_order_release);
+    std::atomic_ref<uint32_t>(WritePC[0]).store(STUR, std::memory_order_release);
 
     ClearICache(&PC[-1], 8);
     // Back up one instruction and have another go

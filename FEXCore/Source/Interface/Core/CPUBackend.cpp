@@ -445,12 +445,32 @@ namespace CPU {
   }
 
 
+  // Shared range predicates for the two views of a code buffer. The last page is protected, so it is
+  // excluded from both ranges.
+  namespace {
+  // [Ptr, lastPage): the RW base where FEX emits code.
+  bool AddressInBufferBase(const CodeBuffer& Buffer, uintptr_t Address) {
+    uintptr_t LastPageAddr = AlignDown(reinterpret_cast<uintptr_t>(Buffer.Ptr) + Buffer.AllocatedSize - 1, FEXCore::Utils::FEX_PAGE_SIZE);
+    return Address >= reinterpret_cast<uintptr_t>(Buffer.Ptr) && Address < LastPageAddr;
+  }
+  // proton-mac W^X dual-map: JIT code EXECUTES from the RX exec alias at Ptr+ExecDelta, so every live JIT
+  // program counter is an alias address (the RW base at Ptr is never executed). ExecDelta == 0 (Linux/no
+  // dual-map) => no distinct alias range.
+  bool AddressInBufferAlias(const CodeBuffer& Buffer, uintptr_t Address) {
+    if (!Buffer.ExecDelta) {
+      return false;
+    }
+    uintptr_t AliasBase = reinterpret_cast<uintptr_t>(Buffer.Ptr) + Buffer.ExecDelta;
+    uintptr_t AliasLastPageAddr = AlignDown(AliasBase + Buffer.AllocatedSize - 1, FEXCore::Utils::FEX_PAGE_SIZE);
+    return Address >= AliasBase && Address < AliasLastPageAddr;
+  }
+  } // namespace
+
   bool CPUBackend::IsAddressInCodeBuffer(uintptr_t Address) const {
+    // Callers that classify a faulting/native PC (e.g. IsJIT in the exception handler) must recognize alias
+    // PCs, otherwise every in-JIT fault is misclassified as non-JIT under the W^X dual-map.
     auto CheckCodeBuffer = [](CodeBuffer& Buffer, uintptr_t Address) {
-      // The last page of the code buffer is protected, so we need to exclude it from the valid range
-      // when checking if the address is in the code buffer.
-      uintptr_t LastPageAddr = AlignDown(reinterpret_cast<uintptr_t>(Buffer.Ptr) + Buffer.AllocatedSize - 1, FEXCore::Utils::FEX_PAGE_SIZE);
-      return (Address >= reinterpret_cast<uintptr_t>(Buffer.Ptr) && Address < LastPageAddr);
+      return AddressInBufferBase(Buffer, Address) || AddressInBufferAlias(Buffer, Address);
     };
 
     if (CheckCodeBuffer(*CurrentCodeBuffer, Address)) {
@@ -462,6 +482,20 @@ namespace CPU {
       }
     }
     return false;
+  }
+
+  ptrdiff_t CPUBackend::GetExecDeltaForAddress(uintptr_t AliasAddress) const {
+    // Mirror IsAddressInCodeBuffer's iteration (current + retained signal-handler generations); the faulting
+    // PC may live in an older buffer during a nested signal, so we cannot assume CurrentCodeBuffer.
+    if (AddressInBufferAlias(*CurrentCodeBuffer, AliasAddress)) {
+      return CurrentCodeBuffer->ExecDelta;
+    }
+    for (auto& Buffer : SignalHandlerCodeBuffers) {
+      if (AddressInBufferAlias(*Buffer, AliasAddress)) {
+        return Buffer->ExecDelta;
+      }
+    }
+    return 0;
   }
 
 } // namespace CPU

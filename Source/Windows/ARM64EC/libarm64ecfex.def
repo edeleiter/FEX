@@ -21,13 +21,3 @@ EXPORTS
   ThreadInit
   ThreadTerm
   UpdateProcessorInformation
-  g_TraceArmed DATA
-  g_FireSeq DATA
-  g_SiteA_EverFired DATA
-  g_SiteB_EverFired DATA
-  g_RecEC DATA
-  g_RecCC DATA
-  g_RingArmed DATA
-  g_RingCount DATA
-  g_RingOverflow DATA
-  g_RingCC DATA
