@@ -109,6 +109,29 @@ uint64_t g_SiteB_EverFired = 0;  // free-running: did CheckCall end: run for ANY
 //   thunk, per-signature -- x9 is dead at CheckCall end:, clobbered to NtDllBase), target = x11.
 uint64_t g_RecEC[32] = {};
 uint64_t g_RecCC[32] = {};
+
+// ---- proton-mac R1a "Site D" sequence ring (supersedes the one-shot for CheckCall) ----------------------
+// The one-shot above captured only the FIRST CheckCall after arming, which turned out to be a common
+// FEX-internal pre-step (ECSyscallHandler::PreCompile, NOT the user32 dispatch) -- identical for every call.
+// The real user32 divergence is a LATER fire. So instead of one record, record EVERY CheckCall fire while
+// ring-armed into g_RingCC, then diff the GetCursorPos fire-stream against the PeekMessage stream host-side.
+// Independent of g_TraceArmed so Site A's one-shot cannot disarm the ring (and vice-versa).
+//   g_RingArmed    -- 0=off, else the active id (guest sets before a call, clears after).
+//   g_RingCount    -- fires recorded this arm; also the append index; guest resets to 0 between the 2 calls.
+//   g_RingOverflow -- set if a fire arrived with the ring already full (guards against a truncated ring).
+//   g_EntryX9      -- CheckCall-top stashes x9-on-entry here (the contract's own/FFS addr, dead by end:);
+//                     end: pairs it back. Safe: CheckCall makes no calls, so it is non-re-entrant per thread.
+//   g_RingCC       -- 1-D ring, RING_SLOTS slots x 14 u64:
+//                     {seq, entry-x9, x10, x11, x30, x0, x1, x2, x3, x4, x5, x6, x7, x8}
+//                     (offsets 0,8,16,...,104). x10 = the exit-thunk SIGNATURE (the fork discriminator);
+//                     x0-x8 = the arg/return register state the guest hands each dispatch (fork-58 probe:
+//                     what input drives PeekMessage down the return path vs GetCursorPos into its body).
+static constexpr uint64_t RING_SLOTS = 512;
+uint64_t g_RingArmed = 0;
+uint64_t g_RingCount = 0;
+uint64_t g_RingOverflow = 0;
+uint64_t g_EntryX9 = 0;
+uint64_t g_RingCC[RING_SLOTS * 14] = {};
 }
 
 struct ThreadCPUArea {
