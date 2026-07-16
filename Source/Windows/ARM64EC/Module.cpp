@@ -745,6 +745,12 @@ bool ResetToConsistentStateImpl(const ThreadCPUArea CPUArea, EXCEPTION_RECORD* E
 
 NTSTATUS ResetToConsistentState(EXCEPTION_RECORD* Exception, CONTEXT* GuestContext, ARM64_NT_CONTEXT* NativeContext) {
   bool Cont {};
+  /* proton-mac DIAGNOSTIC (H1: does the AV reach FEX's handler, with what code?) -- record only, no I/O. */
+  g_fexovc.rtcs_count++;
+  g_fexovc.rtcs_last_code = Exception->ExceptionCode;
+  g_fexovc.rtcs_last_fault = Exception->ExceptionInformation[1];
+  g_fexovc.rtcs_last_pc = NativeContext->Pc;
+  if (Exception->ExceptionCode == EXCEPTION_ACCESS_VIOLATION) g_fexovc.rtcs_av_count++;
   if (Exception->ExceptionCode == EXCEPTION_ACCESS_VIOLATION) {
     const auto FaultAddress = static_cast<uint64_t>(Exception->ExceptionInformation[1]);
 
