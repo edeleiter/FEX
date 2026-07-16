@@ -430,6 +430,10 @@ struct CpuStateFrame {
 #ifdef ARCHITECTURE_arm64ec
   // Set by the kernel on ARM64EC whenever the JIT should cooperatively suspend running guest code.
   uint32_t SuspendDoorbell {};
+  // proton-mac: back-pointer to this thread's CHPE_V2_CPU_AREA_INFO (== TEB[0x1788]), seeded once at
+  // thread init. Lets the JIT reach the CpuArea from STATE without reading it via x18 (macOS zeroes x18,
+  // so the `ldr [x18,#0x1788]` reads in EmitSignalGuardedRegion storm-fault). Read as [STATE, #ECCpuArea].
+  uint64_t ECCpuArea {};
 #endif
 
   // Pointers that the JIT needs to load to remove relocations

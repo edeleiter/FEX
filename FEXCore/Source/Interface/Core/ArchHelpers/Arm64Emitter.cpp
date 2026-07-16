@@ -775,6 +775,17 @@ void Arm64Emitter::SpillStaticRegs(ARMEmitter::Register TmpReg, SpillStaticRegOp
       }
     }
   }
+
+#ifdef ARCHITECTURE_arm64ec
+  if (Options.ECStashState) {
+    // proton-mac: reserve a 16B slot in our emulator-stack frame (sp moved down, so the slot sits ABOVE
+    // the callee's frame and survives the `blr` into EC native code) and stash STATE there. The paired
+    // stack-recovering FillStaticRegs pops it, recovering STATE WITHOUT x18 (macOS zeroes x18/TEB across
+    // the EC callout, and the segv-net leaves x18==0, so the old `ldr [x18,#0x1788]` reload storm-faults).
+    // Must be the LAST op in SpillStaticRegs: no STATE-relative store may follow the sp move.
+    stp<ARMEmitter::IndexType::PRE>(STATE, ARMEmitter::XReg::zr, ARMEmitter::Reg::rsp, -16);
+  }
+#endif
 }
 
 void Arm64Emitter::FillStaticRegs(FillStaticRegOptions Options) {
@@ -805,9 +816,16 @@ void Arm64Emitter::FillStaticRegs(FillStaticRegOptions Options) {
   auto TmpReg2 = *Options.OptionalReg2;
 
 #ifdef ARCHITECTURE_arm64ec
-  // Load STATE in from the CPU area as x28 is not callee saved in the ARM64EC ABI.
-  ldr(TmpReg.X(), ARMEmitter::Reg::r18, TEB_CPU_AREA_OFFSET);
-  ldr(STATE, TmpReg, CPU_AREA_EMULATOR_DATA_OFFSET);
+  if (Options.ECRecoverStateFromStack) {
+    // proton-mac: pop STATE from the emulator-stack slot the paired SpillStaticRegs pushed. x18-free:
+    // macOS zeroes x18/TEB across the EC callout, so the old `ldr [x18,#0x1788]` reload storm-faults.
+    // Must precede any sp use in this function so the pop lands on the pushed slot.
+    ldp<ARMEmitter::IndexType::POST>(STATE, ARMEmitter::XReg::zr, ARMEmitter::Reg::rsp, 16);
+  } else {
+    // Load STATE in from the CPU area as x28 is not callee saved in the ARM64EC ABI.
+    ldr(TmpReg.X(), ARMEmitter::Reg::r18, TEB_CPU_AREA_OFFSET);
+    ldr(STATE, TmpReg, CPU_AREA_EMULATOR_DATA_OFFSET);
+  }
 #endif
 
   ldr(REG_CALLRET_SP, STATE.R(), offsetof(FEXCore::Core::CpuStateFrame, State.callret_sp));

@@ -140,6 +140,10 @@ protected:
     uint32_t FPRSpillMask {~0U};
     bool FPRs {true};
     bool NZCV {true};
+    // proton-mac (ARM64EC/macOS x18 storm fix): push STATE to an emulator-stack slot so the paired
+    // FillStaticRegs can recover it WITHOUT x18 (macOS zeroes x18/TEB across the EC callout). Opt-in
+    // per verified callout site (must be balanced 1:1 with a stack-recovering FillStaticRegs).
+    bool ECStashState {false};
   };
 
   struct FillStaticRegOptions final {
@@ -149,6 +153,9 @@ protected:
     uint32_t FPRFillMask {~0U};
     bool FPRs {true};
     bool NZCV {true};
+    // proton-mac: pop STATE from the emulator-stack slot pushed by the paired SpillStaticRegs (x18-free),
+    // instead of the ldr [x18,#0x1788] reload that faults on macOS. Opt-in per verified callout site.
+    bool ECRecoverStateFromStack {false};
   };
 
   void SpillStaticRegs(ARMEmitter::Register TmpReg, SpillStaticRegOptions Options);

@@ -946,6 +946,9 @@ NTSTATUS ThreadInit() {
   FEX::Windows::CallRetStack::InitializeThread(Thread);
   Thread->CurrentFrame->Pointers.ExitFunctionEC = reinterpret_cast<uintptr_t>(&ExitFunctionEC);
   CPUArea.StateFrame() = Thread->CurrentFrame;
+  // proton-mac: seed the STATE->CpuArea back-pointer so the JIT can reach the CpuArea without x18
+  // (macOS zeroes x18/TEB across EC callouts; reading it via x18 storm-faults). See CpuStateFrame::ECCpuArea.
+  Thread->CurrentFrame->ECCpuArea = reinterpret_cast<uint64_t>(CPUArea.Area);
 
   uint64_t EnterEC = Thread->CurrentFrame->Pointers.DispatcherLoopTopEnterEC;
   CPUArea.DispatcherLoopTopEnterEC() = EnterEC;

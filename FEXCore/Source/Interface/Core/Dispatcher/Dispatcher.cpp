@@ -306,7 +306,9 @@ void Dispatcher::EmitDispatcher() {
 #endif
 
 #ifdef ARCHITECTURE_arm64ec
-    ldr(TMP2, ARMEmitter::XReg::x18, TEB_CPU_AREA_OFFSET);
+    // proton-mac: reach CpuArea via STATE (x18-free) instead of `ldr [x18,#0x1788]` which storm-faults
+    // (macOS zeroes x18). STATE is valid here (pre-Body, before the callout).
+    ldr(TMP2, STATE, offsetof(FEXCore::Core::CpuStateFrame, ECCpuArea));
     LoadConstant(ARMEmitter::Size::i32Bit, TMP1, 1);
     strb(TMP1.W(), TMP2, CPU_AREA_IN_SYSCALL_CALLBACK_OFFSET);
 #endif
@@ -314,7 +316,8 @@ void Dispatcher::EmitDispatcher() {
     Body();
 
 #ifdef ARCHITECTURE_arm64ec
-    ldr(TMP2, ARMEmitter::XReg::x18, TEB_CPU_AREA_OFFSET);
+    // proton-mac: STATE was restored by Body's FillStaticRegs, so reach CpuArea via STATE (x18-free).
+    ldr(TMP2, STATE, offsetof(FEXCore::Core::CpuStateFrame, ECCpuArea));
     strb(ARMEmitter::WReg::zr, TMP2, CPU_AREA_IN_SYSCALL_CALLBACK_OFFSET);
 #endif
 
@@ -332,7 +335,9 @@ void Dispatcher::EmitDispatcher() {
   {
     ExitFunctionLinkerAddress = GetCursorAddress<uint64_t>();
     EmitSignalGuardedRegion([&]() {
-      SpillStaticRegs(TMP1);
+      // proton-mac: stash STATE on the emulator stack across the EC callout (x18-free recovery); the paired
+      // FillStaticRegs below pops it. Straight-line Spill->blr->Fill here, so the push/pop balance exactly.
+      SpillStaticRegs(TMP1, {.ECStashState = true});
 
       mov(ARMEmitter::XReg::x0, STATE);
       mov(ARMEmitter::XReg::x1, ARMEmitter::XReg::lr);
@@ -348,7 +353,9 @@ void Dispatcher::EmitDispatcher() {
         mov(TMP1, ARMEmitter::XReg::x0);
       }
 
-      FillStaticRegs();
+      // proton-mac: recover STATE from the emulator-stack slot pushed above (x18-free), instead of the
+      // storm-faulting ldr [x18,#0x1788] reload.
+      FillStaticRegs({.ECRecoverStateFromStack = true});
     });
 
     br(TMP1);

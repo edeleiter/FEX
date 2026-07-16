@@ -830,7 +830,18 @@ ContextImpl::CompileCodeResult ContextImpl::CompileCode(FEXCore::Core::InternalT
   };
 }
 
+/* proton-mac DIAGNOSTIC (slow-vs-stuck, Step 1): CompileBlock runs on a LookupCache MISS (a guest RIP with no
+ * translated block yet), so its count climbing == the guest reaching NEW code == bounded forward progress;
+ * frozen while the CPU spins == the guest looping in already-compiled blocks. Record-only; read via lldb by
+ * numeric address at intervals. Revert before ship. */
+extern "C" {
+unsigned long long g_prog_compile = 0;
+unsigned long long g_prog_last_rip = 0;
+}
+
 uintptr_t ContextImpl::CompileBlock(FEXCore::Core::CpuStateFrame* Frame, uint64_t GuestRIP, uint64_t MaxInst) {
+  g_prog_compile++;
+  g_prog_last_rip = GuestRIP;
   if constexpr (BLOCK_DEBUGGING) {
     // Block debugging logic is hand-written and needs to be handled with care.
     // Force MaxInst to only be one in this case.
