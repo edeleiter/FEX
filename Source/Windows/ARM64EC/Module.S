@@ -1,6 +1,24 @@
 .text
 .balign 16
 
+// proton-mac (x18 perf): macOS zeroes x18 (the Windows TEB register) on sigreturn + cold-page abort, so every
+// [x18,#imm] TEB access at these OS-dispatch stubs storm-faults into Wine's segv-net (a full SIGSEGV round-trip,
+// ~424K/sec, ~64% of a core). Restore x18=TEB x18-free here instead: read the TEB from Wine's pthread TSD via
+// TPIDRRO_EL0 (validated to survive signals + context switches). Fast path is one non-taken cbnz (x18 already
+// valid); the reload only runs when macOS just zeroed x18. Fails safe: if FEXTebTSDKey is 0 (query unsupported)
+// we leave x18=0 and fall through to the segv-net (today's behavior). Uses only x16/x17 (IP0/IP1 scratch here);
+// x9 (dispatch target) and all other regs preserved. FEXTebTSDKey is seeded once in Module.cpp ProcessInit.
+.macro RESTORE_X18_IF_ZERO id
+  cbnz x18, .Lx18ok\id                        // common case: x18 already the TEB -> nothing to do
+  adrp x17, FEXTebTSDKey
+  ldr x17, [x17, #:lo12:FEXTebTSDKey]          // x17 = Wine's pthread teb_key (TSD slot index)
+  cbz x17, .Lx18ok\id                          // key unavailable -> leave x18=0, let the segv-net handle it
+  mrs x16, TPIDRRO_EL0
+  bic x16, x16, #7                             // low 3 bits = CPU index on macOS -> mask to the _pthread TSD base
+  ldr x18, [x16, x17, lsl #3]                  // x18 = TSD[teb_key] = TEB
+.Lx18ok\id:
+.endm
+
   // __os_arm64x_x64_jump in ARM64EC docs
   // Expects target code address in x9
 .globl DispatchJump
@@ -15,6 +33,7 @@ RetToEntryThunk:
   mov x9, lr
 
 check_target_ec:
+  RESTORE_X18_IF_ZERO 1
   // Check if target is in fact x86 code
   ldr x16, [x18, #0x60] // TEB->PEB
   ldr x16, [x16, #0x368] // PEB->EcCodeBitMap
@@ -32,6 +51,7 @@ ExitToX64:
   str lr, [sp, #-8]! // Push return address to stack, this will be popped by the x86 RET instr.
 
 enter_jit:
+  RESTORE_X18_IF_ZERO 2
   ldr x17, [x18, #0x1788] // TEB->ChpeV2CpuAreaInfo
   mov w16, #1
   strb w16, [x17, #0x0] // ChpeV2CpuAreaInfo->InSimulation
@@ -41,11 +61,13 @@ enter_jit:
   // Invoked by KiUserEmulationDispatcher after e.g. an NtContinue to x86 code
 .global BeginSimulation
 BeginSimulation:
+  RESTORE_X18_IF_ZERO 3
   ldr x17, [x18, #0x1788] // TEB->ChpeV2CpuAreaInfo
   ldr x16, [x17, #0x8] // ChpeV2CpuAreaInfo->EmulatorStackBase
   mov sp, x16
   ldr x0, [x17, #0x18] // ChpeV2CpuAreaInfo->ContextAmd64
   bl "#SyncThreadContext"
+  RESTORE_X18_IF_ZERO 4
   ldr x17, [x18, #0x1788] // TEB->ChpeV2CpuAreaInfo
   ldr x16, [x17, #0x48] // ChpeV2CpuAreaInfo->EmulatorData[3] - DispatcherLoopTopEnterECFillSRA
   mov x11, #0 // Zero ENTRY_FILL_SRA_SINGLE_INST_REG to avoid single step
@@ -59,6 +81,7 @@ ExitFunctionEC:
   mrs x17, fpcr
   and x17, x17, #~6 // NEP + AH
   msr fpcr, x17
+  RESTORE_X18_IF_ZERO 5
   ldr x17, [x18, #0x1788] // TEB->ChpeV2CpuAreaInfo
   strb wzr, [x17, #0x0] // ChpeV2CpuAreaInfo->InSimulation
   ldr x17, [x17, #0x20] // ChpeV2CpuAreaInfo->SuspendDoorbell

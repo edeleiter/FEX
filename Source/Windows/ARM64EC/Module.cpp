@@ -78,6 +78,11 @@ extern void* ExitFunctionSuspendResumePoint;
 void* X64ReturnInstr; // See Module.S
 uintptr_t NtDllBase;
 
+// proton-mac (x18 perf): Wine's pthread teb_key value (the TEB is stored in this TSD slot per-thread). Module.S
+// reads it to restore x18=TEB x18-free via TPIDRRO_EL0 after macOS zeroes x18, instead of storm-faulting every
+// EC transition into the segv-net. 0 => unavailable; Module.S then degrades to the fault path (today's behavior).
+uint64_t FEXTebTSDKey = 0; // See Module.S
+
 // Exports on ARM64EC point to x64 fast forward sequences to allow for redirecting to the JIT if functions are hotpatched. This LUT is from their addresses to the relative addresses of the native code exports.
 uint32_t* NtDllRedirectionLUT;
 uint32_t NtDllRedirectionLUTSize;
@@ -629,6 +634,17 @@ NTSTATUS ProcessInit() {
 
   FEX::Windows::Allocator::SetupHooks(NtDll);
   FEX::Windows::UnixLib::Init(NtDll);
+
+  // proton-mac (x18 perf): fetch Wine's pthread teb_key once so Module.S can restore x18=TEB x18-free (via the
+  // TPIDRRO_EL0 pthread TSD) after macOS zeroes x18, instead of storm-faulting every EC transition into the
+  // segv-net. Fails safe: if the query is unsupported, FEXTebTSDKey stays 0 and Module.S keeps today's behavior.
+  {
+    ULONG_PTR Key = 0;
+    if (NtQueryVirtualMemory(NtCurrentProcess(), nullptr, (MEMORY_INFORMATION_CLASS)MemoryFexTebTsdKey, &Key, sizeof(Key), nullptr) ==
+        STATUS_SUCCESS) {
+      FEXTebTSDKey = Key;
+    }
+  }
 
   {
     auto HostFeatures = FEX::Windows::CPUFeatures::FetchHostFeatures(IsWine, FEXCore::HostFeatures::HostTypeEnum::Arm64ec);

@@ -471,6 +471,7 @@ typedef enum _MEMORY_INFORMATION_CLASS {
 #endif
   MemoryFexStatsShm = 2000,
   MemoryFexExecAlias = 2001, // proton-mac: RX exec alias for a dualmap JIT write base
+  MemoryFexTebTsdKey = 2002, // proton-mac: pthread teb_key for x18-free x18=TEB restore in Module.S
 } MEMORY_INFORMATION_CLASS;
 
 #define SystemEmulationBasicInformation (SYSTEM_INFORMATION_CLASS)62
