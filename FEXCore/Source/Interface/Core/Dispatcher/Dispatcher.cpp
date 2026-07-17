@@ -148,6 +148,11 @@ void Dispatcher::EmitDispatcher() {
 
   AbsoluteLoopTopAddressEnterECFillSRA = GetCursorAddress<uint64_t>();
   ldr(STATE, EC_ENTRY_CPUAREA_REG, CPU_AREA_EMULATOR_DATA_OFFSET);
+  // proton-mac (SITE A): proactively restore x18=TEB on EC re-entry (macOS zeroes it across the callout; the
+  // segv-net leaves it 0 and sigreturn re-zeroes it -> self-sustaining ~311K/sec fault storm). STATE is valid
+  // here, so reload from the seeded ECTeb; must precede FillStaticRegs() (its default ARM64EC path reads x18)
+  // and the LoopTop EC-bitmap read. x18 is callee-preserved through downstream native EC code.
+  ldr(ARMEmitter::XReg::x18, STATE, offsetof(FEXCore::Core::CpuStateFrame, ECTeb));
   FillStaticRegs();
 
   ldr(RipReg, STATE_PTR(CpuStateFrame, State.rip));
@@ -160,6 +165,8 @@ void Dispatcher::EmitDispatcher() {
   AbsoluteLoopTopAddressEnterEC = GetCursorAddress<uint64_t>();
   // Load ThreadState and write the target PC there
   ldr(STATE, EC_ENTRY_CPUAREA_REG, CPU_AREA_EMULATOR_DATA_OFFSET);
+  // proton-mac (SITE B): proactively restore x18=TEB on EC re-entry (see SITE A). STATE just reloaded above.
+  ldr(ARMEmitter::XReg::x18, STATE, offsetof(FEXCore::Core::CpuStateFrame, ECTeb));
   str(EC_CALL_CHECKER_PC_REG, STATE_PTR(CpuStateFrame, State.rip));
 
   // Swap stacks to the emulator stack
@@ -195,6 +202,13 @@ void Dispatcher::EmitDispatcher() {
   ldr(RipReg, STATE_PTR(CpuStateFrame, State.rip));
 
 #ifdef ARCHITECTURE_arm64ec
+  // proton-mac (SITE D): restore x18=TEB at the top of EVERY LoopTop iteration. macOS re-zeroes x18 on every
+  // sigreturn, so a signal at ANY point during the prior block's execution leaves x18=0 here — and the
+  // per-block EC-bitmap read below (plus any EC exit) then storm-faults, a self-sustaining loop (~311K/sec).
+  // STATE (x28) is preserved block->LoopTop within the JIT, so this reload is cheap; one ldr/block is far
+  // cheaper than the fault+sigreturn it prevents. This is the steady-state fix; SITE A/B/C cover the entries.
+  ldr(ARMEmitter::XReg::x18, STATE, offsetof(FEXCore::Core::CpuStateFrame, ECTeb));
+
   // Clobbers TMP1/2
   // Check the EC code bitmap incase we need to exit the JIT to call into native code.
   ARMEmitter::ForwardLabel l_NotECCode;
@@ -211,6 +225,10 @@ void Dispatcher::EmitDispatcher() {
 
   add(ARMEmitter::Size::i64Bit, ARMEmitter::Reg::rsp, StaticRegisters[X86State::REG_RSP], 0);
   mov(EC_CALL_CHECKER_PC_REG, RipReg);
+  // proton-mac (SITE C): proactively restore x18=TEB before exiting to native ExitFunctionEC. STATE is valid
+  // here; x18 is callee-preserved from here through ExitFunctionEC (Module.S reads [x18,#0x1788]) and the Wine
+  // __wine_syscall_dispatcher (reads [x18,#0x378], no self-restore) -> kills the residual pump-path storm.
+  ldr(ARMEmitter::XReg::x18, STATE, offsetof(FEXCore::Core::CpuStateFrame, ECTeb));
   ldr(TMP2, STATE_PTR(CpuStateFrame, Pointers.ExitFunctionEC));
   br(TMP2);
 
