@@ -7,6 +7,8 @@ $end_info$
 */
 
 #include <FEXCore/fextl/fmt.h>
+#include <FEXCore/fextl/string.h>
+#include <FEXCore/fextl/vector.h>
 #include <FEXCore/Core/X86Enums.h>
 #include <FEXCore/Core/SignalDelegator.h>
 #include <FEXCore/Core/Context.h>
@@ -582,7 +584,33 @@ NTSTATUS ProcessInit() {
 
   FEX::Windows::InitCRTProcess();
   const auto ExecutableName = FEX::Windows::BaseName(FEX::Windows::GetExecutableFilePath());
-  FEX::Config::LoadConfig(fextl::string {ExecutableName}, _environ, FEX::ReadPortabilityInformation());
+
+  // Build the environment array for config from the PEB. The mingw DLL CRT never populates _environ/getenv
+  // (only an EXE's mainCRTStartup calls __getmainargs), and calling kernel32 GetEnvironmentStrings* this
+  // early in EC init faults, so read the wide, double-null-terminated PEB environment block directly and
+  // narrow each ASCII KEY=VALUE entry. Stored with process lifetime — the env config layer keeps this
+  // pointer and ReloadMetaLayer() re-reads it below.
+  static fextl::vector<fextl::string> EnvStorage;
+  static fextl::vector<char*> EnvPtrs;
+  if (auto* Params = reinterpret_cast<__TEB*>(NtCurrentTeb())->Peb->ProcessParameters) {
+    const auto* WEnv = reinterpret_cast<const wchar_t*>(static_cast<uintptr_t>(Params->Environment));
+    for (const wchar_t* Entry = WEnv; WEnv && *Entry;) {
+      const wchar_t* p = Entry;
+      fextl::string Narrow;
+      for (; *p; ++p) {
+        Narrow.push_back(static_cast<char>(*p)); // environment variables are ASCII
+      }
+      EnvStorage.emplace_back(std::move(Narrow));
+      Entry = p + 1; // step past the null terminator to the next KEY=VALUE entry
+    }
+  }
+  EnvPtrs.reserve(EnvStorage.size() + 1);
+  for (auto& Var : EnvStorage) {
+    EnvPtrs.push_back(Var.data());
+  }
+  EnvPtrs.push_back(nullptr);
+
+  FEX::Config::LoadConfig(fextl::string {ExecutableName}, EnvPtrs.data(), FEX::ReadPortabilityInformation());
   FEXCore::Config::ReloadMetaLayer();
   FEX::Windows::Logging::Init();
 
@@ -949,6 +977,7 @@ NTSTATUS ThreadInit() {
   // proton-mac: seed the STATE->CpuArea back-pointer so the JIT can reach the CpuArea without x18
   // (macOS zeroes x18/TEB across EC callouts; reading it via x18 storm-faults). See CpuStateFrame::ECCpuArea.
   Thread->CurrentFrame->ECCpuArea = reinterpret_cast<uint64_t>(CPUArea.Area);
+  Thread->CurrentFrame->ECTeb = reinterpret_cast<uint64_t>(NtCurrentTeb());
 
   uint64_t EnterEC = Thread->CurrentFrame->Pointers.DispatcherLoopTopEnterEC;
   CPUArea.DispatcherLoopTopEnterEC() = EnterEC;

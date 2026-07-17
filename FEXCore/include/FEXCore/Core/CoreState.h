@@ -434,6 +434,11 @@ struct CpuStateFrame {
   // thread init. Lets the JIT reach the CpuArea from STATE without reading it via x18 (macOS zeroes x18,
   // so the `ldr [x18,#0x1788]` reads in EmitSignalGuardedRegion storm-fault). Read as [STATE, #ECCpuArea].
   uint64_t ECCpuArea {};
+  // proton-mac: this thread's TEB (x18), seeded once at thread init. Lets FillStaticRegs proactively
+  // RESTORE x18=TEB at every callout return, so x18 is valid in the JIT between callouts and the guest's
+  // next EC call / syscall sees x18=TEB (macOS zeroes x18 across callouts; the segv-net leaves it 0, so
+  // otherwise every downstream x18 read -- FEX dispatcher AND Wine __wine_syscall_dispatcher -- storm-faults).
+  uint64_t ECTeb {};
 #endif
 
   // Pointers that the JIT needs to load to remove relocations

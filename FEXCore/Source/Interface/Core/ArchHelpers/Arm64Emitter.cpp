@@ -821,6 +821,10 @@ void Arm64Emitter::FillStaticRegs(FillStaticRegOptions Options) {
     // macOS zeroes x18/TEB across the EC callout, so the old `ldr [x18,#0x1788]` reload storm-faults.
     // Must precede any sp use in this function so the pop lands on the pushed slot.
     ldp<ARMEmitter::IndexType::POST>(STATE, ARMEmitter::XReg::zr, ARMEmitter::Reg::rsp, 16);
+    // proton-mac: also RESTORE x18=TEB (macOS clobbered it across the callout) from the seeded ECTeb, so x18
+    // is valid in the JIT after this return -- the guest's next EC call/syscall then sees x18=TEB and the
+    // downstream x18 reads (other FEX sites AND Wine's __wine_syscall_dispatcher) stop storm-faulting.
+    ldr(ARMEmitter::XReg::x18, STATE.R(), offsetof(FEXCore::Core::CpuStateFrame, ECTeb));
   } else {
     // Load STATE in from the CPU area as x28 is not callee saved in the ARM64EC ABI.
     ldr(TmpReg.X(), ARMEmitter::Reg::r18, TEB_CPU_AREA_OFFSET);
