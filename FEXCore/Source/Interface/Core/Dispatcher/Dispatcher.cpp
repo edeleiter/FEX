@@ -212,8 +212,13 @@ void Dispatcher::EmitDispatcher() {
   // Clobbers TMP1/2
   // Check the EC code bitmap incase we need to exit the JIT to call into native code.
   ARMEmitter::ForwardLabel l_NotECCode;
-  ldr(TMP1, ARMEmitter::XReg::x18, TEB_PEB_OFFSET);
-  ldr(TMP1, TMP1, PEB_EC_CODE_BITMAP_OFFSET);
+  // proton-mac: source the PEB from STATE.ECTeb (FEX-managed, callee-preserved, NOT clobbered by sigreturn)
+  // rather than via x18. The SITE-D x18 restore above still has a sigreturn-reopenable window before this read
+  // (macOS re-zeroes x18 on sigreturn); reading the TEB from STATE removes x18 from the path entirely, so this
+  // per-block EC-bitmap check never storm-faults. One extra load vs. the SIGSEGV round-trip it eliminates.
+  ldr(TMP1, STATE, offsetof(FEXCore::Core::CpuStateFrame, ECTeb)); // TMP1 = TEB (x18-free)
+  ldr(TMP1, TMP1, TEB_PEB_OFFSET);                                 // TMP1 = TEB->PEB
+  ldr(TMP1, TMP1, PEB_EC_CODE_BITMAP_OFFSET);                      // TMP1 = PEB->EcCodeBitMap
 
   lsr(ARMEmitter::Size::i64Bit, TMP2, RipReg, 18);
   ldr(TMP1, TMP1, TMP2, ARMEmitter::ExtendedType::LSL_64, 3);
