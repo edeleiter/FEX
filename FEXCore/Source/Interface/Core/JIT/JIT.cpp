@@ -511,7 +511,10 @@ static void DirectBlockDelinker(FEXCore::Context::ExitFunctionLinkData* Record, 
     BranchEmit.b(BranchOffset);
   }
 
-  std::atomic_ref<uint32_t>(*reinterpret_cast<uint32_t*>(CallerAddress)).store(BranchInst, std::memory_order::relaxed);
+  // proton-mac W^X: patch through the caller's RW alias (CallerAddress - ExecDelta); ClearICache on the RX
+  // executed VA. g_DelinkExecDelta was published by Erase from this link's stored ExecDelta (0 on Linux).
+  std::atomic_ref<uint32_t>(*reinterpret_cast<uint32_t*>(CallerAddress - FEXCore::g_DelinkExecDelta))
+    .store(BranchInst, std::memory_order::relaxed);
   ARMEmitter::Emitter::ClearICache(reinterpret_cast<void*>(CallerAddress), 4);
 }
 
@@ -522,7 +525,10 @@ static void IndirectBlockDelinker(FEXCore::Context::ExitFunctionLinkData* Record
   // Restore branch +2 instructions to jump to the linker block
   BranchEmit.b(0x2);
 
-  std::atomic_ref<uint32_t>(*reinterpret_cast<uint32_t*>(JumpThunkStartAddress)).store(BranchInst, std::memory_order::relaxed);
+  // proton-mac W^X: patch through the RW alias (JumpThunkStartAddress - ExecDelta); ClearICache on the RX VA.
+  // (Only reached via the out-of-range link path, which is dormant on macOS in Phase 1; g_DelinkExecDelta is 0 on Linux.)
+  std::atomic_ref<uint32_t>(*reinterpret_cast<uint32_t*>(JumpThunkStartAddress - FEXCore::g_DelinkExecDelta))
+    .store(BranchInst, std::memory_order::relaxed);
   ARMEmitter::Emitter::ClearICache(reinterpret_cast<void*>(JumpThunkStartAddress), 4);
 
   // No need to reset HostCode here as the exit linker pointer is stored separately, and if the block is relinked it will be updated.
@@ -555,18 +561,27 @@ uint64_t Arm64JITCore::ExitFunctionLink(FEXCore::Core::CpuStateFrame* Frame, FEX
     }
   }
 
-#ifdef PROTON_MAC
-  // proton-mac JIT W^X: block-linking below patches the caller's ALREADY-EXECUTING code, which lives at the
-  // RX exec alias (not writable under the dual-map). Skip linking and re-dispatch per block via the returned
-  // HostCode instead. Perf-only; correctness preserved. (Direct-link support needs the runtime exec->write
-  // translation — deferred.)
-  return HostCode;
-#endif
+  // proton-mac JIT W^X: block-linking below patches the caller's ALREADY-EXECUTING code, which lives at the RX
+  // exec alias (not writable under the dual-map). Phase 1 restores the common in-range branch case by writing
+  // through the caller's RW dual-map alias (CallerAddress - ExecDelta) resolved by GetExecDeltaForCodeAddress,
+  // then ClearICache on the RX VA. The out-of-range path stays re-dispatching (Phase 2). See below.
 
   // See ExitFunction in BranchOps.cpp for an assembly level view of the handled cases.
   uintptr_t JumpThunkStartAddress = reinterpret_cast<uintptr_t>(Record) - 0x10;
   uintptr_t CallerAddress = JumpThunkStartAddress + Record->CallerOffset;
   auto BranchOffset = HostCode / 4 - CallerAddress / 4;
+
+#ifdef PROTON_MAC
+  // Resolve the caller block's RX->RW offset. Record/JumpThunk/CallerAddress are all RX addresses in ONE block,
+  // so a single delta covers them. FAIL-SAFE: an unresolved address (== 0 under the dual-map) means we can't
+  // safely translate -> skip linking and re-dispatch (correct, just slower). Never patch on an unresolved delta.
+  const ptrdiff_t ExecDelta = static_cast<Context::ContextImpl*>(Thread->CTX)->GetExecDeltaForCodeAddress(JumpThunkStartAddress);
+  if (ExecDelta == 0) {
+    return HostCode;
+  }
+#else
+  constexpr ptrdiff_t ExecDelta = 0;
+#endif
 
   uint32_t ExpectedKnownCallMarkerInst = 0;
   ARMEmitter::Emitter ExpectedKnownCallMarkerEmit(reinterpret_cast<uint8_t*>(&ExpectedKnownCallMarkerInst), 4);
@@ -590,16 +605,25 @@ uint64_t Arm64JITCore::ExitFunctionLink(FEXCore::Core::CpuStateFrame* Frame, FEX
     if (KnownCallMarkerInst == ExpectedKnownCallMarkerInst) {
       BranchEmit.bl(BranchOffset);
       Thread->LookupCache->AddBlockLink(
-        GuestRip, Record, [](FEXCore::Context::ExitFunctionLinkData* Record) { DirectBlockDelinker(Record, true); }, lk);
+        GuestRip, Record, [](FEXCore::Context::ExitFunctionLinkData* Record) { DirectBlockDelinker(Record, true); }, ExecDelta, lk);
     } else {
       BranchEmit.b(BranchOffset);
       Thread->LookupCache->AddBlockLink(
-        GuestRip, Record, [](FEXCore::Context::ExitFunctionLinkData* Record) { DirectBlockDelinker(Record, false); }, lk);
+        GuestRip, Record, [](FEXCore::Context::ExitFunctionLinkData* Record) { DirectBlockDelinker(Record, false); }, ExecDelta, lk);
     }
 
-    std::atomic_ref<uint32_t>(*reinterpret_cast<uint32_t*>(CallerAddress)).store(BranchInst, std::memory_order::relaxed);
+    // proton-mac W^X: BranchInst encodes an RX-relative offset (executes from CallerAddress at the RX alias), but
+    // is WRITTEN through the RW alias (CallerAddress - ExecDelta); ClearICache targets the RX executed VA. On
+    // Linux ExecDelta == 0 so this is the original store. Single aligned 4-byte store = atomically replaceable.
+    std::atomic_ref<uint32_t>(*reinterpret_cast<uint32_t*>(CallerAddress - ExecDelta)).store(BranchInst, std::memory_order::relaxed);
     ARMEmitter::Emitter::ClearICache(reinterpret_cast<void*>(CallerAddress), 4);
   } else {
+#ifdef PROTON_MAC
+    // proton-mac Phase 1: the out-of-range path patches Record->HostCode and JumpThunkStartAddress (both RX code
+    // buffer memory). Deferred to Phase 2 (needs the same RW-alias translation + IndirectBlockDelinker). Until
+    // then, leave this edge re-dispatching. (ExecDelta != 0 here — the == 0 fail-safe returned above.)
+    return HostCode;
+#endif
     // This case is common between calls and jumps as the thunk callsite can be left untouched.
     std::atomic_ref<uint64_t>(Record->HostCode).store(HostCode, std::memory_order::seq_cst);
 #ifdef ARCHITECTURE_arm64
@@ -613,7 +637,7 @@ uint64_t Arm64JITCore::ExitFunctionLink(FEXCore::Core::CpuStateFrame* Frame, FEX
     std::atomic_ref<uint32_t>(*reinterpret_cast<uint32_t*>(JumpThunkStartAddress)).store(LdrInst, std::memory_order::relaxed);
     ARMEmitter::Emitter::ClearICache(reinterpret_cast<void*>(JumpThunkStartAddress), 4);
 
-    Thread->LookupCache->AddBlockLink(GuestRip, Record, IndirectBlockDelinker, lk);
+    Thread->LookupCache->AddBlockLink(GuestRip, Record, IndirectBlockDelinker, ExecDelta, lk);
   }
 
   return HostCode;

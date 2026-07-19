@@ -992,6 +992,27 @@ void ContextImpl::InvalidateCodeBuffersCodeRange(uint64_t Start, uint64_t Length
   }
 }
 
+ptrdiff_t ContextImpl::GetExecDeltaForCodeAddress(uintptr_t AliasAddress) {
+  // proton-mac W^X: resolve which live CodeBuffer's RX exec alias contains AliasAddress and return that buffer's
+  // ExecDelta (RW = RX - ExecDelta). The caller block being (de)linked may live in an older generation than any
+  // single thread's CurrentCodeBuffer, so we must scan all live buffers. Standalone CodeBufferListLock acquire
+  // (no other FEX lock held at the link callsite) -> no lock-ordering hazard. Returns 0 when not found or when a
+  // buffer has no dual-map alias, so callers fail safe (skip linking, keep correct re-dispatch).
+  std::scoped_lock lk {CodeBufferListLock};
+  for (auto& Weak : CodeBufferList) {
+    if (auto Buffer = Weak.lock()) {
+      if (!Buffer->ExecDelta) {
+        continue;
+      }
+      uintptr_t AliasBase = reinterpret_cast<uintptr_t>(Buffer->Ptr) + Buffer->ExecDelta;
+      if (AliasAddress >= AliasBase && AliasAddress < AliasBase + Buffer->UsableSize()) {
+        return Buffer->ExecDelta;
+      }
+    }
+  }
+  return 0;
+}
+
 void ContextImpl::InvalidateThreadCachedCodeRange(FEXCore::Core::InternalThreadState* Thread, uint64_t Start, uint64_t Length) {
   LOGMAN_THROW_A_FMT(CodeInvalidationMutex.try_lock() == false, "CodeInvalidationMutex needs to be unique_locked here");
 

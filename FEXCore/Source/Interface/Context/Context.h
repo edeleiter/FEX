@@ -219,6 +219,11 @@ public:
   void ClearCodeCache(FEXCore::Core::InternalThreadState* Thread, bool NewCodeBuffer = true) override;
   void InvalidateCodeBuffersCodeRange(uint64_t Start, uint64_t Length) override;
   void InvalidateThreadCachedCodeRange(FEXCore::Core::InternalThreadState* Thread, uint64_t Start, uint64_t Length) override;
+
+  // proton-mac JIT W^X block-linking: given an RX exec-alias address, return the ExecDelta of the live CodeBuffer
+  // whose alias range contains it (so RW = Address - ExecDelta), else 0. Walks the process-global CodeBufferList
+  // because the (de)linked caller block may live in an older buffer than any one thread's CurrentCodeBuffer.
+  ptrdiff_t GetExecDeltaForCodeAddress(uintptr_t AliasAddress);
   FEXCore::Utils::WritePriorityMutex::Mutex& GetCodeInvalidationMutex() override {
     return CodeInvalidationMutex;
   }

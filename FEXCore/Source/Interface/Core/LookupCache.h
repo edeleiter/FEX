@@ -18,6 +18,12 @@
 #include <mutex>
 
 namespace FEXCore {
+// proton-mac JIT W^X block-linking: bridges the per-link ExecDelta from GuestToHostMap::Erase to the delinker
+// callbacks, whose fixed `void(ExitFunctionLinkData*)` signature can't carry it. Erase sets this from the link's
+// stored ExecDelta immediately before invoking the delinker (synchronous, same-thread) so the delinker writes the
+// callsite through its RW alias (CallerAddress - ExecDelta). 0 on Linux/no-dualmap -> a no-op offset.
+inline thread_local ptrdiff_t g_DelinkExecDelta = 0;
+
 struct LookupCacheBaseLockToken {
 protected:
   // Protected constructor - only derived classes can construct
@@ -77,7 +83,14 @@ struct GuestToHostMap {
   //
   // This makes `BlockLinks` look like a raw pointer that could memory leak, but since it is backed by the MBR, it won't.
   fextl::pmr::named_monotonic_page_buffer_resource BlockLinks_mbr;
-  using BlockLinksMapType = std::pmr::map<BlockLinkTag, FEXCore::Context::BlockDelinkerFunc>;
+  // proton-mac JIT W^X block-linking: carry the ExecDelta used to patch this link so Erase can hand the delinker
+  // the exact RX->RW offset for the CALLER's buffer. The caller may live in a different (older) CodeBuffer than
+  // the map storing the link, so a per-map delta would be wrong; per-link is strictly correct. 0 on Linux.
+  struct BlockLinkData {
+    FEXCore::Context::BlockDelinkerFunc Delinker;
+    ptrdiff_t ExecDelta;
+  };
+  using BlockLinksMapType = std::pmr::map<BlockLinkTag, BlockLinkData>;
   fextl::unique_ptr<std::pmr::polymorphic_allocator<std::byte>> BlockLinks_pma;
   BlockLinksMapType* BlockLinks;
 
@@ -115,7 +128,9 @@ struct GuestToHostMap {
     auto lower = BlockLinks->lower_bound({Address, nullptr});
     auto upper = BlockLinks->upper_bound({Address, reinterpret_cast<FEXCore::Context::ExitFunctionLinkData*>(UINTPTR_MAX)});
     for (auto it = lower; it != upper; it = BlockLinks->erase(it)) {
-      it->second(it->first.HostLink);
+      // proton-mac: publish this link's ExecDelta so the delinker patches the caller's RW alias (0 on Linux).
+      g_DelinkExecDelta = it->second.ExecDelta;
+      it->second.Delinker(it->first.HostLink);
     }
 
     // Remove from BlockList
@@ -137,8 +152,8 @@ struct GuestToHostMap {
   }
 
   void AddBlockLink(uint64_t GuestDestination, FEXCore::Context::ExitFunctionLinkData* HostLink,
-                    const FEXCore::Context::BlockDelinkerFunc& delinker, const LookupCacheWriteLockToken&) {
-    BlockLinks->insert({{GuestDestination, HostLink}, delinker});
+                    const FEXCore::Context::BlockDelinkerFunc& delinker, ptrdiff_t ExecDelta, const LookupCacheWriteLockToken&) {
+    BlockLinks->insert({{GuestDestination, HostLink}, {delinker, ExecDelta}});
   }
 
   bool AddBlockExecutableRange(const std::ranges::input_range auto& Addresses, uint64_t Start, uint64_t Length, const LookupCacheWriteLockToken&) {
@@ -347,8 +362,8 @@ public:
   }
 
   void AddBlockLink(uint64_t GuestDestination, FEXCore::Context::ExitFunctionLinkData* HostLink,
-                    const FEXCore::Context::BlockDelinkerFunc& delinker, const LookupCacheWriteLockToken& lk) {
-    Shared->AddBlockLink(GuestDestination, HostLink, delinker, lk);
+                    const FEXCore::Context::BlockDelinkerFunc& delinker, ptrdiff_t ExecDelta, const LookupCacheWriteLockToken& lk) {
+    Shared->AddBlockLink(GuestDestination, HostLink, delinker, ExecDelta, lk);
   }
 
   void ClearCache(const LookupCacheWriteLockToken&);
