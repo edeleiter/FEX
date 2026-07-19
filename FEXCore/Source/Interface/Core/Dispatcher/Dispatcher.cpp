@@ -212,13 +212,12 @@ void Dispatcher::EmitDispatcher() {
   // Clobbers TMP1/2
   // Check the EC code bitmap incase we need to exit the JIT to call into native code.
   ARMEmitter::ForwardLabel l_NotECCode;
-  // proton-mac: source the PEB from STATE.ECTeb (FEX-managed, callee-preserved, NOT clobbered by sigreturn)
-  // rather than via x18. The SITE-D x18 restore above still has a sigreturn-reopenable window before this read
-  // (macOS re-zeroes x18 on sigreturn); reading the TEB from STATE removes x18 from the path entirely, so this
-  // per-block EC-bitmap check never storm-faults. One extra load vs. the SIGSEGV round-trip it eliminates.
-  ldr(TMP1, STATE, offsetof(FEXCore::Core::CpuStateFrame, ECTeb)); // TMP1 = TEB (x18-free)
-  ldr(TMP1, TMP1, TEB_PEB_OFFSET);                                 // TMP1 = TEB->PEB
-  ldr(TMP1, TMP1, PEB_EC_CODE_BITMAP_OFFSET);                      // TMP1 = PEB->EcCodeBitMap
+  // proton-mac: read the process-global EcCodeBitMap base from STATE.ECCodeBitmapBase (FEX-managed,
+  // callee-preserved, NOT clobbered by sigreturn) with ONE independent load, instead of the 3-deep dependent
+  // chase TEB->PEB->EcCodeBitMap on every LoopTop iteration. x18-free (macOS re-zeroes x18 on sigreturn) AND
+  // cheaper (removes a serialized 2-load pointer chase from the dispatch critical path). Seeded once at thread
+  // init next to ECTeb; mirrors Wine's own pm_ec_code_bitmap cache (signal_arm64ec.c:1924).
+  ldr(TMP1, STATE, offsetof(FEXCore::Core::CpuStateFrame, ECCodeBitmapBase)); // TMP1 = PEB->EcCodeBitMap (cached, x18-free)
 
   lsr(ARMEmitter::Size::i64Bit, TMP2, RipReg, 18);
   ldr(TMP1, TMP1, TMP2, ARMEmitter::ExtendedType::LSL_64, 3);

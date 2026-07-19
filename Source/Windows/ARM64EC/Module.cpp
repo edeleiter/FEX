@@ -994,6 +994,9 @@ NTSTATUS ThreadInit() {
   // (macOS zeroes x18/TEB across EC callouts; reading it via x18 storm-faults). See CpuStateFrame::ECCpuArea.
   Thread->CurrentFrame->ECCpuArea = reinterpret_cast<uint64_t>(CPUArea.Area);
   Thread->CurrentFrame->ECTeb = reinterpret_cast<uint64_t>(NtCurrentTeb());
+  // proton-mac: cache PEB->EcCodeBitMap (process-global, never reallocated) so the dispatcher's per-block EC
+  // check is one load off STATE, not a 3-deep TEB->PEB->EcCodeBitMap chase. See CpuStateFrame::ECCodeBitmapBase.
+  Thread->CurrentFrame->ECCodeBitmapBase = reinterpret_cast<uint64_t>(reinterpret_cast<__TEB*>(NtCurrentTeb())->Peb->EcCodeBitMap);
 
   uint64_t EnterEC = Thread->CurrentFrame->Pointers.DispatcherLoopTopEnterEC;
   CPUArea.DispatcherLoopTopEnterEC() = EnterEC;

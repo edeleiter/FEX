@@ -439,6 +439,11 @@ struct CpuStateFrame {
   // next EC call / syscall sees x18=TEB (macOS zeroes x18 across callouts; the segv-net leaves it 0, so
   // otherwise every downstream x18 read -- FEX dispatcher AND Wine __wine_syscall_dispatcher -- storm-faults).
   uint64_t ECTeb {};
+  // proton-mac: cached PEB->EcCodeBitMap (process-global, assigned once, never reallocated), seeded once at
+  // thread init next to ECTeb. Lets the JIT dispatcher's per-block EC-code check read the bitmap base with a
+  // single [STATE, #ECCodeBitmapBase] load instead of a 3-deep dependent chase (TEB->PEB->EcCodeBitMap). Mirrors
+  // Wine's own pm_ec_code_bitmap cache (signal_arm64ec.c).
+  uint64_t ECCodeBitmapBase {};
 #endif
 
   // Pointers that the JIT needs to load to remove relocations
