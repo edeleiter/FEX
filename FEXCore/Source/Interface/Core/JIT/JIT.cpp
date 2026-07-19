@@ -622,6 +622,7 @@ uint64_t Arm64JITCore::ExitFunctionLink(FEXCore::Core::CpuStateFrame* Frame, FEX
     // proton-mac Phase 1: the out-of-range path patches Record->HostCode and JumpThunkStartAddress (both RX code
     // buffer memory). Deferred to Phase 2 (needs the same RW-alias translation + IndirectBlockDelinker). Until
     // then, leave this edge re-dispatching. (ExecDelta != 0 here — the == 0 fail-safe returned above.)
+    FEXCore::Reprofile::g_oor_skip.fetch_add(1, std::memory_order_relaxed); // THROWAWAY re-profile: Phase-2 sizing. REVERT.
     return HostCode;
 #endif
     // This case is common between calls and jumps as the thunk callsite can be left untouched.

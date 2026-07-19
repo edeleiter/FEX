@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 #pragma once
 #include "Interface/Context/Context.h"
+#include "Interface/Core/ReprofileCounters.h" // THROWAWAY re-profile instrumentation. REVERT BEFORE SHIP.
 #include <FEXCore/Utils/LogManager.h>
 #include <FEXCore/Utils/SHMStats.h>
 #include <FEXCore/Utils/WritePriorityMutex.h>
@@ -239,6 +240,7 @@ public:
     }
 
     FEXCORE_PROFILE_INSTANT_INCREMENT(Thread, AccumulatedCacheMissCount, 1);
+    FEXCore::Reprofile::OnFindBlock(); // THROWAWAY re-profile: non-EC re-dispatch counter + periodic dump. REVERT.
 
     return HostPtr;
   }
